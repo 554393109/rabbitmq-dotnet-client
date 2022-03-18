@@ -129,24 +129,26 @@ namespace RabbitMQ.Client.Impl
             OnSessionShutdown(reason);
         }
 
-        public virtual void Transmit<T>(in T cmd) where T : struct, IOutgoingAmqpMethod
+        public virtual void Transmit<T>(ref T cmd) where T : struct, IOutgoingAmqpMethod
         {
             if (!IsOpen && cmd.ProtocolCommandId != client.framing.ProtocolCommandId.ChannelCloseOk)
             {
                 ThrowAlreadyClosedException();
             }
 
-            Connection.Write(Framing.SerializeToFrames(cmd, ChannelNumber));
+            Connection.Write(Framing.SerializeToFrames(ref cmd, ChannelNumber));
         }
 
-        public void Transmit<T>(in T cmd, ContentHeaderBase header, ReadOnlyMemory<byte> body) where T : struct, IOutgoingAmqpMethod
+        public void Transmit<TMethod, THeader>(ref TMethod cmd, ref THeader header, ReadOnlyMemory<byte> body)
+            where TMethod : struct, IOutgoingAmqpMethod
+            where THeader : IAmqpHeader
         {
             if (!IsOpen && cmd.ProtocolCommandId != ProtocolCommandId.ChannelCloseOk)
             {
                 ThrowAlreadyClosedException();
             }
 
-            Connection.Write(Framing.SerializeToFrames(cmd, header, body, ChannelNumber, Connection.MaxPayloadSize));
+            Connection.Write(Framing.SerializeToFrames(ref cmd, ref header, body, ChannelNumber, Connection.MaxPayloadSize));
         }
 
         private void ThrowAlreadyClosedException()

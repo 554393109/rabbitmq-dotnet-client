@@ -74,10 +74,10 @@ namespace RabbitMQ.Client.Unit
             const int Channel = 3;
             const int BodyLength = 10;
 
-            var basicProperties = new Framing.BasicProperties { AppId = "A" };
-            int payloadSize = basicProperties.GetRequiredPayloadBufferSize();
+            var basicProperties = new BasicProperties { AppId = "A" };
+            int payloadSize = ((IAmqpWriteable)basicProperties).GetRequiredBufferSize();
             byte[] frameBytes = new byte[Impl.Framing.Header.FrameSize + BodyLength + payloadSize];
-            Impl.Framing.Header.WriteTo(frameBytes, Channel, basicProperties, BodyLength);
+            Impl.Framing.Header.WriteTo(frameBytes, Channel, ref  basicProperties, BodyLength);
 
             Assert.Equal(20, Impl.Framing.Header.FrameSize);
             Assert.Equal(Constants.FrameHeader, frameBytes[0]);
@@ -114,7 +114,7 @@ namespace RabbitMQ.Client.Unit
             var method = new BasicPublish("E", "R", true, true);
             int payloadSize = method.GetRequiredBufferSize();
             byte[] frameBytes = new byte[Impl.Framing.Method.FrameSize + payloadSize];
-            Impl.Framing.Method.WriteTo(frameBytes, Channel, method);
+            Impl.Framing.Method.WriteTo(frameBytes, Channel, ref method);
 
             Assert.Equal(12, Impl.Framing.Method.FrameSize);
             Assert.Equal(Constants.FrameMethod, frameBytes[0]);

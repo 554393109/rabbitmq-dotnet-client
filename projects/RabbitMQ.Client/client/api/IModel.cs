@@ -179,6 +179,7 @@ namespace RabbitMQ.Client
         /// <summary>Reject one or more delivered message(s).</summary>
         void BasicNack(ulong deliveryTag, bool multiple, bool requeue);
 
+#nullable enable
         /// <summary>
         /// Publishes a message.
         /// </summary>
@@ -187,7 +188,8 @@ namespace RabbitMQ.Client
         ///     Routing key must be shorter than 255 bytes.
         ///   </para>
         /// </remarks>
-        void BasicPublish(string exchange, string routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body);
+        void BasicPublish<TProperties>(string exchange, string routingKey, ref TProperties basicProperties, ReadOnlyMemory<byte> body = default, bool mandatory = false)
+            where TProperties : IReadOnlyBasicProperties, IAmqpHeader;
         /// <summary>
         /// Publishes a message.
         /// </summary>
@@ -196,7 +198,9 @@ namespace RabbitMQ.Client
         ///     Routing key must be shorter than 255 bytes.
         ///   </para>
         /// </remarks>
-        void BasicPublish(CachedString exchange, CachedString routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body);
+        void BasicPublish<TProperties>(CachedString exchange, CachedString routingKey, ref TProperties basicProperties, ReadOnlyMemory<byte> body = default, bool mandatory = false)
+            where TProperties : IReadOnlyBasicProperties, IAmqpHeader;
+#nullable disable
 
         /// <summary>
         /// Configures QoS parameters of the Basic content-class.
@@ -228,11 +232,6 @@ namespace RabbitMQ.Client
         /// Enable publisher acknowledgements.
         /// </summary>
         void ConfirmSelect();
-
-        /// <summary>
-        /// Construct a completely empty content header for use with the Basic content class.
-        /// </summary>
-        IBasicProperties CreateBasicProperties();
 
         /// <summary>
         /// Bind an exchange to an exchange.
@@ -435,7 +434,7 @@ namespace RabbitMQ.Client
         /// <remarks>
         /// Waits until all messages published since the last call have
         /// been ack'd by the broker.  If a nack is received or the timeout
-        /// elapses, throws an OperationInterruptedException exception immediately.
+        /// elapses, throws an IOException exception immediately.
         /// </remarks>
         Task WaitForConfirmsOrDieAsync(CancellationToken token = default);
 

@@ -29,21 +29,13 @@
 //  Copyright (c) 2007-2020 VMware, Inc.  All rights reserved.
 //---------------------------------------------------------------------------
 
+using System;
+
 namespace RabbitMQ.Client
 {
-    /// <summary>
-    /// A decoded AMQP content header frame.
-    /// </summary>
-    public interface IContentHeader// : ICloneable
+    internal static class InternalConstants
     {
-        /// <summary>
-        /// Retrieve the AMQP class ID of this content header.
-        /// </summary>
-        ushort ProtocolClassId { get; }
-
-        /// <summary>
-        /// Retrieve the AMQP class name of this content header.
-        /// </summary>
-        string ProtocolClassName { get; }
+        internal static readonly TimeSpan DefaultConnectionAbortTimeout = TimeSpan.FromSeconds(5);
+        internal static readonly TimeSpan DefaultConnectionCloseTimeout = TimeSpan.FromSeconds(30);
     }
 }

@@ -42,13 +42,13 @@ using RabbitMQ.Client.Logging;
 
 namespace RabbitMQ.Client.Framing.Impl
 {
-    #nullable enable
+#nullable enable
     internal sealed partial class Connection : IConnection
     {
         private bool _disposed;
         private volatile bool _closed;
 
-        private readonly IConnectionFactory _factory;
+        private readonly ConnectionConfig _config;
         private readonly ModelBase _model0;
         private readonly MainSession _session0;
 
@@ -58,10 +58,9 @@ namespace RabbitMQ.Client.Framing.Impl
         private ShutdownEventArgs? _closeReason;
         public ShutdownEventArgs? CloseReason => Volatile.Read(ref _closeReason);
 
-        public Connection(IConnectionFactory factory, IFrameHandler frameHandler, string? clientProvidedName = null)
+        public Connection(ConnectionConfig config, IFrameHandler frameHandler)
         {
-            ClientProvidedName = clientProvidedName;
-            _factory = factory;
+            _config = config;
             _frameHandler = frameHandler;
 
             Action<Exception, string> onException = (exception, context) => OnCallbackException(CallbackExceptionEventArgs.Build(exception, context));
@@ -72,21 +71,30 @@ namespace RabbitMQ.Client.Framing.Impl
 
             _sessionManager = new SessionManager(this, 0);
             _session0 = new MainSession(this);
-            _model0 = (ModelBase)Protocol.CreateModel(factory, _session0);
+            _model0 = new Model(_config, _session0);;
 
-            ClientProperties = new Dictionary<string, object?>(factory.ClientProperties)
+            ClientProperties = new Dictionary<string, object?>(_config.ClientProperties)
             {
                 ["capabilities"] = Protocol.Capabilities,
                 ["connection_name"] = ClientProvidedName
             };
 
             _mainLoopTask = Task.Factory.StartNew(MainLoop, TaskCreationOptions.LongRunning);
-            Open();
+            try
+            {
+                Open();
+            }
+            catch
+            {
+                var ea = new ShutdownEventArgs(ShutdownInitiator.Library, Constants.InternalError, "FailedOpen");
+                Close(ea, true, TimeSpan.FromSeconds(5));
+                throw;
+            }
         }
 
         public Guid Id => _id;
 
-        public string? ClientProvidedName { get; }
+        public string? ClientProvidedName => _config.ClientProvidedName;
 
         public ushort ChannelMax => _sessionManager.ChannelMax;
 
@@ -99,11 +107,6 @@ namespace RabbitMQ.Client.Framing.Impl
         public bool IsOpen => CloseReason is null;
 
         public int LocalPort => _frameHandler.LocalPort;
-
-        ///<summary>Another overload of a Protocol property, useful
-        ///for exposing a tighter type.</summary>
-        internal ProtocolBase Protocol => (ProtocolBase)Endpoint.Protocol;
-
         public int RemotePort => _frameHandler.RemotePort;
 
         public IDictionary<string, object?>? ServerProperties { get; private set; }
@@ -113,6 +116,16 @@ namespace RabbitMQ.Client.Framing.Impl
 
         ///<summary>Explicit implementation of IConnection.Protocol.</summary>
         IProtocol IConnection.Protocol => Endpoint.Protocol;
+
+        ///<summary>Another overload of a Protocol property, useful
+        ///for exposing a tighter type.</summary>
+        internal ProtocolBase Protocol => (ProtocolBase)Endpoint.Protocol;
+
+        ///<summary>Used for testing only.</summary>
+        internal IFrameHandler FrameHandler
+        {
+            get { return _frameHandler; }
+        }
 
         public event EventHandler<CallbackExceptionEventArgs> CallbackException
         {
@@ -206,8 +219,7 @@ namespace RabbitMQ.Client.Framing.Impl
         {
             EnsureIsOpen();
             ISession session = CreateSession();
-            var model = (ModelBase)Protocol.CreateModel(_factory, session);
-            model.ContinuationTimeout = _factory.ContinuationTimeout;
+            var model = new Model(_config, session);
             model._Private_ChannelOpen();
             return model;
         }
@@ -250,7 +262,7 @@ namespace RabbitMQ.Client.Framing.Impl
         ///</para>
         ///<para>
         ///Timeout determines how much time internal close operations should be given
-        ///to complete. System.Threading.Timeout.InfiniteTimeSpan value means infinity.
+        ///to complete.
         ///</para>
         ///</remarks>
         internal void Close(ShutdownEventArgs reason, bool abort, TimeSpan timeout)
@@ -270,7 +282,11 @@ namespace RabbitMQ.Client.Framing.Impl
                 try
                 {
                     // Try to send connection.close wait for CloseOk in the MainLoop
-                    _session0.Transmit(new ConnectionClose(reason.ReplyCode, reason.ReplyText, 0, 0));
+                    if (!_closed)
+                    {
+                        var cmd = new ConnectionClose(reason.ReplyCode, reason.ReplyText, 0, 0);
+                        _session0.Transmit(ref cmd);
+                    }
                 }
                 catch (AlreadyClosedException)
                 {
@@ -392,7 +408,7 @@ namespace RabbitMQ.Client.Framing.Impl
 
             try
             {
-                this.Abort();
+                this.Abort(InternalConstants.DefaultConnectionAbortTimeout);
                 _mainLoopTask.Wait();
             }
             catch (OperationInterruptedException)

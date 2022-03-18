@@ -132,7 +132,7 @@ namespace RabbitMQ.Client.Impl
             set => InnerChannel.DefaultConsumer = value;
         }
 
-        public bool IsClosed => _innerChannel != null && _innerChannel.IsClosed;
+        public bool IsClosed => !IsOpen;
 
         public bool IsOpen => _innerChannel != null && _innerChannel.IsOpen;
 
@@ -166,12 +166,19 @@ namespace RabbitMQ.Client.Impl
                 newChannel.TxSelect();
             }
 
+            /*
+             * https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1140
+             * If this assignment is not done before recovering consumers, there is a good
+             * chance that an invalid Model will be used to handle a basic.deliver frame,
+             * with the resulting basic.ack never getting sent out.
+             */
+            _innerChannel = newChannel;
+
             if (recoverConsumers)
             {
                 _connection.RecoverConsumers(this, newChannel);
             }
 
-            _innerChannel = newChannel;
             _innerChannel.RunRecoveryEventHandlers(this);
         }
 
@@ -242,11 +249,13 @@ namespace RabbitMQ.Client.Impl
         public void BasicNack(ulong deliveryTag, bool multiple, bool requeue)
             => InnerChannel.BasicNack(deliveryTag, multiple, requeue);
 
-        public void BasicPublish(string exchange, string routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body)
-            => InnerChannel.BasicPublish(exchange, routingKey, mandatory, basicProperties, body);
+        public void BasicPublish<TProperties>(string exchange, string routingKey, ref TProperties basicProperties, ReadOnlyMemory<byte> body, bool mandatory)
+            where TProperties : IReadOnlyBasicProperties, IAmqpHeader
+            => InnerChannel.BasicPublish(exchange, routingKey, ref basicProperties, body, mandatory);
 
-        public void BasicPublish(CachedString exchange, CachedString routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body)
-            => InnerChannel.BasicPublish(exchange, routingKey, mandatory, basicProperties, body);
+        public void BasicPublish<TProperties>(CachedString exchange, CachedString routingKey, ref TProperties basicProperties, ReadOnlyMemory<byte> body, bool mandatory)
+            where TProperties : IReadOnlyBasicProperties, IAmqpHeader
+            => InnerChannel.BasicPublish(exchange, routingKey, ref basicProperties, body, mandatory);
 
         public void BasicQos(uint prefetchSize, ushort prefetchCount, bool global)
         {
@@ -276,9 +285,6 @@ namespace RabbitMQ.Client.Impl
             InnerChannel.ConfirmSelect();
             _usesPublisherConfirms = true;
         }
-
-        public IBasicProperties CreateBasicProperties()
-            => InnerChannel.CreateBasicProperties();
 
         public void ExchangeBind(string destination, string source, string routingKey, IDictionary<string, object> arguments)
         {

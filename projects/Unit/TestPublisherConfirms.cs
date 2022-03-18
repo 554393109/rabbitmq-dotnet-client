@@ -37,6 +37,7 @@ using System.Threading.Tasks;
 using RabbitMQ.Client.Impl;
 
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RabbitMQ.Client.Unit
 {
@@ -44,6 +45,10 @@ namespace RabbitMQ.Client.Unit
     public class TestPublisherConfirms : IntegrationFixture
     {
         private const string QueueName = "RabbitMQ.Client.Unit.TestPublisherConfirms";
+
+        public TestPublisherConfirms(ITestOutputHelper output) : base(output)
+        {
+        }
 
         [Fact]
         public void TestWaitForConfirmsWithoutTimeout()
@@ -109,7 +114,7 @@ namespace RabbitMQ.Client.Unit
             {
                 for (int i = 0; i < n; i++)
                 {
-                    ch.BasicPublish("", QueueName, null, _encoding.GetBytes("msg"));
+                    ch.BasicPublish("", QueueName, _encoding.GetBytes("msg"));
                 }
                 await ch.WaitForConfirmsAsync().ConfigureAwait(false);
 
@@ -117,7 +122,7 @@ namespace RabbitMQ.Client.Unit
                 // to be equal to N because acks can be batched,
                 // so we primarily care about event handlers being invoked
                 // in this test
-                Assert.True(c > 20);
+                Assert.True(c > 5);
             }
             finally
             {
@@ -135,7 +140,7 @@ namespace RabbitMQ.Client.Unit
             ReadOnlyMemory<byte> body = _encoding.GetBytes("msg");
             for (int i = 0; i < numberOfMessagesToPublish; i++)
             {
-                ch.BasicPublish("", QueueName, null, body);
+                ch.BasicPublish("", QueueName, body);
             }
 
             try

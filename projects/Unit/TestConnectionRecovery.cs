@@ -39,50 +39,114 @@ using RabbitMQ.Client.Framing.Impl;
 using RabbitMQ.Client.Impl;
 
 using Xunit;
+using Xunit.Abstractions;
 
 #pragma warning disable 0618
 
 namespace RabbitMQ.Client.Unit
 {
-    [CollectionDefinition("NoParallelization", DisableParallelization = true)]
-    public class NoParallelizationCollection { }
-    class DisposableConnection : IDisposable
-    {
-        public DisposableConnection(AutorecoveringConnection c)
-        {
-            Connection = c;
-        }
-
-        public AutorecoveringConnection Connection { get; }
-
-        public void Dispose()
-        {
-            Connection.Close();
-        }
-    }
-
-    [Collection("NoParallelization")]
     public class TestConnectionRecovery : IntegrationFixture
     {
-        protected override void SetUp()
+        private readonly byte[] _messageBody;
+        private readonly ushort _totalMessageCount = 1024;
+        private readonly ushort _closeAtCount = 16;
+        private string _queueName;
+
+        public TestConnectionRecovery(ITestOutputHelper output) : base(output)
         {
-            _conn = CreateAutorecoveringConnection();
-            _model = _conn.CreateModel();
+            var rnd = new Random();
+            _messageBody = new byte[4096];
+            rnd.NextBytes(_messageBody);
         }
 
-        public override void Dispose()
+        protected override void SetUp()
         {
-            _conn.Close();
+            _queueName = $"TestConnectionRecovery-queue-{Guid.NewGuid()}";
+            _conn = CreateAutorecoveringConnection();
+            _model = _conn.CreateModel();
+            _model.QueueDelete(_queueName);
+        }
 
+        protected override void ReleaseResources()
+        {
+            // TODO LRB not really necessary
+            if (_model.IsOpen)
+            {
+                _model.Close();
+            }
+
+            if (_conn.IsOpen)
+            {
+                _conn.Close();
+            }
+
+            Unblock();
         }
 
         [Fact]
         public void TestBasicAckAfterChannelRecovery()
         {
-            var latch = new ManualResetEventSlim(false);
-            var cons = new AckingBasicConsumer(_model, latch, CloseAndWaitForRecovery);
+            var allMessagesSeenLatch = new ManualResetEventSlim(false);
+            var cons = new AckingBasicConsumer(_model, _totalMessageCount, allMessagesSeenLatch);
 
-            TestDelayedBasicAckNackAfterChannelRecovery(cons, latch);
+            string queueName = _model.QueueDeclare(_queueName, false, false, false, null).QueueName;
+            Assert.Equal(queueName, _queueName);
+
+            _model.BasicQos(0, 1, false);
+            string consumerTag = _model.BasicConsume(queueName, false, cons);
+
+            ManualResetEventSlim sl = PrepareForShutdown(_conn);
+            ManualResetEventSlim rl = PrepareForRecovery(_conn);
+
+            PublishMessagesWhileClosingConn(queueName);
+
+            Wait(sl);
+            Wait(rl);
+            Wait(allMessagesSeenLatch);
+        }
+
+        [Fact]
+        public void TestBasicNackAfterChannelRecovery()
+        {
+            var allMessagesSeenLatch = new ManualResetEventSlim(false);
+            var cons = new NackingBasicConsumer(_model, _totalMessageCount, allMessagesSeenLatch);
+
+            string queueName = _model.QueueDeclare(_queueName, false, false, false, null).QueueName;
+            Assert.Equal(queueName, _queueName);
+
+            _model.BasicQos(0, 1, false);
+            string consumerTag = _model.BasicConsume(queueName, false, cons);
+
+            ManualResetEventSlim sl = PrepareForShutdown(_conn);
+            ManualResetEventSlim rl = PrepareForRecovery(_conn);
+
+            PublishMessagesWhileClosingConn(queueName);
+
+            Wait(sl);
+            Wait(rl);
+            Wait(allMessagesSeenLatch);
+        }
+
+        [Fact]
+        public void TestBasicRejectAfterChannelRecovery()
+        {
+            var allMessagesSeenLatch = new ManualResetEventSlim(false);
+            var cons = new RejectingBasicConsumer(_model, _totalMessageCount, allMessagesSeenLatch);
+
+            string queueName = _model.QueueDeclare(_queueName, false, false, false, null).QueueName;
+            Assert.Equal(queueName, _queueName);
+
+            _model.BasicQos(0, 1, false);
+            string consumerTag = _model.BasicConsume(queueName, false, cons);
+
+            ManualResetEventSlim sl = PrepareForShutdown(_conn);
+            ManualResetEventSlim rl = PrepareForRecovery(_conn);
+
+            PublishMessagesWhileClosingConn(queueName);
+
+            Wait(sl);
+            Wait(rl);
+            Wait(allMessagesSeenLatch);
         }
 
         [Fact]
@@ -91,7 +155,7 @@ namespace RabbitMQ.Client.Unit
             string q = GenerateQueueName();
             _model.QueueDeclare(q, false, false, false, null);
             // create an offset
-            _model.BasicPublish("", q, null, ReadOnlyMemory<byte>.Empty);
+            _model.BasicPublish("", q, _messageBody);
             Thread.Sleep(50);
             BasicGetResult g = _model.BasicGet(q, false);
             CloseAndWaitForRecovery();
@@ -99,7 +163,7 @@ namespace RabbitMQ.Client.Unit
             Assert.True(_model.IsOpen);
             // ack the message after recovery - this should be out of range and ignored
             _model.BasicAck(g.DeliveryTag, false);
-            // do a sync operation to 'check' there is no channel exception 
+            // do a sync operation to 'check' there is no channel exception
             _model.BasicGet(q, false);
         }
 
@@ -115,7 +179,7 @@ namespace RabbitMQ.Client.Unit
             CloseAndWaitForRecovery();
             Assert.True(_model.IsOpen);
 
-            WithTemporaryNonExclusiveQueue(_model, (m, q) => m.BasicPublish("", q, null, _encoding.GetBytes("")));
+            WithTemporaryNonExclusiveQueue(_model, (m, q) => m.BasicPublish("", q, _messageBody));
             Wait(latch);
         }
 
@@ -172,15 +236,22 @@ namespace RabbitMQ.Client.Unit
             AutorecoveringConnection c = CreateAutorecoveringConnection();
             var latch = new AutoResetEvent(false);
             c.ConnectionRecoveryError += (o, args) => latch.Set();
-            StopRabbitMQ();
-            latch.WaitOne(30000); // we got the failed reconnection event.
-            bool triedRecoveryAfterClose = false;
-            c.Close();
-            Thread.Sleep(5000);
-            c.ConnectionRecoveryError += (o, args) => triedRecoveryAfterClose = true;
-            Thread.Sleep(10000);
-            Assert.False(triedRecoveryAfterClose);
-            StartRabbitMQ();
+
+            try
+            {
+                StopRabbitMQ();
+                latch.WaitOne(30000); // we got the failed reconnection event.
+                bool triedRecoveryAfterClose = false;
+                c.Close();
+                Thread.Sleep(5000);
+                c.ConnectionRecoveryError += (o, args) => triedRecoveryAfterClose = true;
+                Thread.Sleep(10000);
+                Assert.False(triedRecoveryAfterClose);
+            }
+            finally
+            {
+                StartRabbitMQ();
+            }
         }
 
         [Fact]
@@ -222,24 +293,6 @@ namespace RabbitMQ.Client.Unit
             Assert.True(_model.IsOpen);
             RestartServerAndWaitForRecovery();
             Assert.True(_model.IsOpen);
-        }
-
-        [Fact]
-        public void TestBasicNackAfterChannelRecovery()
-        {
-            var latch = new ManualResetEventSlim(false);
-            var cons = new NackingBasicConsumer(_model, latch, CloseAndWaitForRecovery);
-
-            TestDelayedBasicAckNackAfterChannelRecovery(cons, latch);
-        }
-
-        [Fact]
-        public void TestBasicRejectAfterChannelRecovery()
-        {
-            var latch = new ManualResetEventSlim(false);
-            var cons = new RejectingBasicConsumer(_model, latch, CloseAndWaitForRecovery);
-
-            TestDelayedBasicAckNackAfterChannelRecovery(cons, latch);
         }
 
         [Fact]
@@ -309,7 +362,7 @@ namespace RabbitMQ.Client.Unit
                 var latch = new ManualResetEventSlim(false);
                 cons.Received += (s, args) => latch.Set();
 
-                m.BasicPublish("", q, null, _encoding.GetBytes("msg"));
+                m.BasicPublish("", q, _encoding.GetBytes("msg"));
                 Wait(latch);
 
                 m.QueueDelete(q);
@@ -349,7 +402,7 @@ namespace RabbitMQ.Client.Unit
                 var latch = new ManualResetEventSlim(false);
                 cons.Received += (s, args) => latch.Set();
 
-                m.BasicPublish("", q1, null, _encoding.GetBytes("msg"));
+                m.BasicPublish("", q1, _encoding.GetBytes("msg"));
                 Wait(latch);
 
                 m.QueueDelete(q1);
@@ -518,7 +571,7 @@ namespace RabbitMQ.Client.Unit
             {
                 CloseAndWaitForRecovery();
                 Assert.True(_model.IsOpen);
-                _model.BasicPublish(x2, "", null, _encoding.GetBytes("msg"));
+                _model.BasicPublish(x2, "", _encoding.GetBytes("msg"));
                 AssertMessageCount(q, 1);
             }
             finally
@@ -566,7 +619,7 @@ namespace RabbitMQ.Client.Unit
             ch.ConfirmSelect();
             ch.QueuePurge(q);
             ch.ExchangeDeclare(exchange: x, type: "fanout");
-            ch.BasicPublish(exchange: x, routingKey: "", basicProperties: null, body: _encoding.GetBytes("msg"));
+            ch.BasicPublish(exchange: x, routingKey: "", body: _encoding.GetBytes("msg"));
             WaitForConfirms(ch);
             QueueDeclareOk ok = ch.QueueDeclare(queue: q, durable: false, exclusive: false, autoDelete: true, arguments: null);
             Assert.Equal(1u, ok.MessageCount);
@@ -599,7 +652,7 @@ namespace RabbitMQ.Client.Unit
             Assert.NotEqual(nameBefore, nameAfter);
             ch.ConfirmSelect();
             ch.ExchangeDeclare(exchange: x, type: "fanout");
-            ch.BasicPublish(exchange: x, routingKey: "", basicProperties: null, body: _encoding.GetBytes("msg"));
+            ch.BasicPublish(exchange: x, routingKey: "", body: _encoding.GetBytes("msg"));
             WaitForConfirms(ch);
             QueueDeclareOk ok = ch.QueueDeclarePassive(nameAfter);
             Assert.Equal(1u, ok.MessageCount);
@@ -729,14 +782,21 @@ namespace RabbitMQ.Client.Unit
             ManualResetEventSlim recoveryLatch = PrepareForRecovery((AutorecoveringConnection)_conn);
 
             Assert.True(_conn.IsOpen);
-            StopRabbitMQ();
-            Console.WriteLine("Stopped RabbitMQ. About to sleep for multiple recovery intervals...");
-            Thread.Sleep(7000);
-            StartRabbitMQ();
+
+            try
+            {
+                StopRabbitMQ();
+                Console.WriteLine("Stopped RabbitMQ. About to sleep for multiple recovery intervals...");
+                Thread.Sleep(7000);
+            }
+            finally
+            {
+                StartRabbitMQ();
+            }
+
             Wait(shutdownLatch, TimeSpan.FromSeconds(30));
             Wait(recoveryLatch, TimeSpan.FromSeconds(30));
             Assert.True(_conn.IsOpen);
-
             Assert.True(counter >= 1);
         }
 
@@ -780,7 +840,7 @@ namespace RabbitMQ.Client.Unit
             var latch = new ManualResetEventSlim(false);
             cons.Received += (s, args) => latch.Set();
 
-            _model.BasicPublish("", q, null, ReadOnlyMemory<byte>.Empty);
+            _model.BasicPublish("", q, _messageBody);
             Wait(latch);
 
             _model.QueueUnbind(q, x, rk);
@@ -795,29 +855,29 @@ namespace RabbitMQ.Client.Unit
             _model.QueueDeclare(testQueueName, false, false, false, null);
             var replyConsumer = new EventingBasicConsumer(_model);
             _model.BasicConsume("amq.rabbitmq.reply-to", true, replyConsumer);
-            var properties = _model.CreateBasicProperties();
+            var properties = new BasicProperties();
             properties.ReplyTo = "amq.rabbitmq.reply-to";
 
-            bool done = false;
+            TimeSpan doneSpan = TimeSpan.FromMilliseconds(100);
+            var done = new ManualResetEventSlim(false);
             Task.Run(() =>
             {
                 try
                 {
 
                     CloseAndWaitForRecovery();
-                    Thread.Sleep(100);
                 }
                 finally
                 {
-                    done = true;
+                    done.Set();
                 }
             });
 
-            while (!done)
+            while (!done.IsSet)
             {
                 try
                 {
-                    _model.BasicPublish(string.Empty, testQueueName, false, properties, ReadOnlyMemory<byte>.Empty);
+                    _model.BasicPublish(string.Empty, testQueueName, ref properties, _messageBody);
                 }
                 catch (Exception e)
                 {
@@ -827,7 +887,7 @@ namespace RabbitMQ.Client.Unit
                         Assert.NotEqual(406, a.ShutdownReason.ReplyCode);
                     }
                 }
-                Thread.Sleep(1);
+                done.Wait(doneSpan);
             }
         }
 
@@ -864,7 +924,7 @@ namespace RabbitMQ.Client.Unit
             {
                 CloseAndWaitForRecovery();
                 Assert.True(_model.IsOpen);
-                _model.BasicPublish(x2, "", null, _encoding.GetBytes("msg"));
+                _model.BasicPublish(x2, "", _encoding.GetBytes("msg"));
                 AssertMessageCount(q, 0);
             }
             finally
@@ -914,7 +974,7 @@ namespace RabbitMQ.Client.Unit
             {
                 CloseAndWaitForRecovery();
                 Assert.True(_model.IsOpen);
-                _model.BasicPublish(x2, "", null, _encoding.GetBytes("msg"));
+                _model.BasicPublish(x2, "", _encoding.GetBytes("msg"));
                 AssertMessageCount(q, 0);
             }
             finally
@@ -968,8 +1028,7 @@ namespace RabbitMQ.Client.Unit
             {
                 string rk = "routing-key";
                 m.QueueBind(q, x, rk);
-                byte[] mb = RandomMessageBody();
-                m.BasicPublish(x, rk, null, mb);
+                m.BasicPublish(x, rk, _messageBody);
 
                 Assert.True(WaitForConfirms(m));
                 m.ExchangeDeclarePassive(x);
@@ -987,7 +1046,7 @@ namespace RabbitMQ.Client.Unit
             m.QueueDeclarePassive(q);
             QueueDeclareOk ok1 = m.QueueDeclare(q, false, exclusive, false, null);
             Assert.Equal(0u, ok1.MessageCount);
-            m.BasicPublish("", q, null, _encoding.GetBytes(""));
+            m.BasicPublish("", q, _messageBody);
             Assert.True(WaitForConfirms(m));
             QueueDeclareOk ok2 = m.QueueDeclare(q, false, exclusive, false, null);
             Assert.Equal(1u, ok2.MessageCount);
@@ -1017,10 +1076,19 @@ namespace RabbitMQ.Client.Unit
             Wait(rl);
         }
 
-        internal static ManualResetEventSlim PrepareForRecovery(AutorecoveringConnection conn)
+        internal void CloseAndWaitForShutdown(AutorecoveringConnection conn)
+        {
+            ManualResetEventSlim sl = PrepareForShutdown(conn);
+            CloseConnection(conn);
+            Wait(sl);
+        }
+
+        internal ManualResetEventSlim PrepareForRecovery(IConnection conn)
         {
             var latch = new ManualResetEventSlim(false);
-            conn.RecoverySucceeded += (source, ea) => latch.Set();
+
+            AutorecoveringConnection aconn = conn as AutorecoveringConnection;
+            aconn.RecoverySucceeded += (source, ea) => latch.Set();
 
             return latch;
         }
@@ -1028,14 +1096,11 @@ namespace RabbitMQ.Client.Unit
         internal static ManualResetEventSlim PrepareForShutdown(IConnection conn)
         {
             var latch = new ManualResetEventSlim(false);
-            conn.ConnectionShutdown += (c, args) => latch.Set();
+
+            AutorecoveringConnection aconn = conn as AutorecoveringConnection;
+            aconn.ConnectionShutdown += (c, args) => latch.Set();
 
             return latch;
-        }
-
-        protected override void ReleaseResources()
-        {
-            Unblock();
         }
 
         internal void RestartServerAndWaitForRecovery()
@@ -1052,25 +1117,19 @@ namespace RabbitMQ.Client.Unit
             Wait(rl);
         }
 
-        internal void TestDelayedBasicAckNackAfterChannelRecovery(TestBasicConsumer1 cons, ManualResetEventSlim latch)
+        internal void WaitForRecovery()
         {
-            string q = _model.QueueDeclare(GenerateQueueName(), false, false, false, null).QueueName;
-            int n = 30;
-            _model.BasicQos(0, 1, false);
-            _model.BasicConsume(q, false, cons);
+            Wait(PrepareForRecovery((AutorecoveringConnection)_conn));
+        }
 
-            AutorecoveringConnection publishingConn = CreateAutorecoveringConnection();
-            IModel publishingModel = publishingConn.CreateModel();
+        internal void WaitForRecovery(AutorecoveringConnection conn)
+        {
+            Wait(PrepareForRecovery(conn));
+        }
 
-            for (int i = 0; i < n; i++)
-            {
-                publishingModel.BasicPublish("", q, null, _encoding.GetBytes(""));
-            }
-
-            Wait(latch, TimeSpan.FromSeconds(20));
-            _model.QueueDelete(q);
-            publishingModel.Close();
-            publishingConn.Close();
+        internal void WaitForShutdown()
+        {
+            Wait(PrepareForShutdown(_conn));
         }
 
         internal void WaitForShutdown(IConnection conn)
@@ -1078,10 +1137,28 @@ namespace RabbitMQ.Client.Unit
             Wait(PrepareForShutdown(conn));
         }
 
-        public class AckingBasicConsumer : TestBasicConsumer1
+        internal void PublishMessagesWhileClosingConn(string queueName)
         {
-            public AckingBasicConsumer(IModel model, ManualResetEventSlim latch, Action fn)
-                : base(model, latch, fn)
+            using (AutorecoveringConnection publishingConn = CreateAutorecoveringConnection())
+            {
+                using (IModel publishingModel = publishingConn.CreateModel())
+                {
+                    for (ushort i = 0; i < _totalMessageCount; i++)
+                    {
+                        if (i == _closeAtCount)
+                        {
+                            CloseConnection(_conn);
+                        }
+                        publishingModel.BasicPublish(string.Empty, queueName, _messageBody);
+                    }
+                }
+            }
+        }
+
+        public class AckingBasicConsumer : TestBasicConsumer
+        {
+            public AckingBasicConsumer(IModel model, ushort totalMessageCount, ManualResetEventSlim allMessagesSeenLatch)
+                : base(model, totalMessageCount, allMessagesSeenLatch)
             {
             }
 
@@ -1091,10 +1168,10 @@ namespace RabbitMQ.Client.Unit
             }
         }
 
-        public class NackingBasicConsumer : TestBasicConsumer1
+        public class NackingBasicConsumer : TestBasicConsumer
         {
-            public NackingBasicConsumer(IModel model, ManualResetEventSlim latch, Action fn)
-                : base(model, latch, fn)
+            public NackingBasicConsumer(IModel model, ushort totalMessageCount, ManualResetEventSlim allMessagesSeenLatch)
+                : base(model, totalMessageCount, allMessagesSeenLatch)
             {
             }
 
@@ -1104,10 +1181,10 @@ namespace RabbitMQ.Client.Unit
             }
         }
 
-        public class RejectingBasicConsumer : TestBasicConsumer1
+        public class RejectingBasicConsumer : TestBasicConsumer
         {
-            public RejectingBasicConsumer(IModel model, ManualResetEventSlim latch, Action fn)
-                : base(model, latch, fn)
+            public RejectingBasicConsumer(IModel model, ushort totalMessageCount, ManualResetEventSlim allMessagesSeenLatch)
+                : base(model, totalMessageCount, allMessagesSeenLatch)
             {
             }
 
@@ -1117,17 +1194,17 @@ namespace RabbitMQ.Client.Unit
             }
         }
 
-        public class TestBasicConsumer1 : DefaultBasicConsumer
+        public class TestBasicConsumer : DefaultBasicConsumer
         {
-            private readonly Action _action;
-            private readonly ManualResetEventSlim _latch;
+            private readonly ManualResetEventSlim _allMessagesSeenLatch;
+            private readonly ushort _totalMessageCount;
             private ushort _counter = 0;
 
-            public TestBasicConsumer1(IModel model, ManualResetEventSlim latch, Action fn)
+            public TestBasicConsumer(IModel model, ushort totalMessageCount, ManualResetEventSlim allMessagesSeenLatch)
                 : base(model)
             {
-                _latch = latch;
-                _action = fn;
+                _totalMessageCount = totalMessageCount;
+                _allMessagesSeenLatch = allMessagesSeenLatch;
             }
 
             public override void HandleBasicDeliver(string consumerTag,
@@ -1135,24 +1212,20 @@ namespace RabbitMQ.Client.Unit
                 bool redelivered,
                 string exchange,
                 string routingKey,
-                IBasicProperties properties,
+                in ReadOnlyBasicProperties properties,
                 ReadOnlyMemory<byte> body)
             {
                 try
                 {
-                    if (deliveryTag == 7 && _counter < 10)
-                    {
-                        _action();
-                    }
-                    if (_counter == 9)
-                    {
-                        _latch.Set();
-                    }
                     PostHandleDelivery(deliveryTag);
                 }
                 finally
                 {
-                    _counter += 1;
+                    ++_counter;
+                    if (_counter >= _totalMessageCount)
+                    {
+                        _allMessagesSeenLatch.Set();
+                    }
                 }
             }
 

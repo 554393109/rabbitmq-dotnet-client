@@ -35,12 +35,17 @@ using System.Threading;
 using RabbitMQ.Client.Impl;
 
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RabbitMQ.Client.Unit
 {
 
     public class TestModelShutdown : IntegrationFixture
     {
+        public TestModelShutdown(ITestOutputHelper output) : base(output)
+        {
+        }
+
         [Fact]
         public void TestConsumerDispatcherShutdown()
         {

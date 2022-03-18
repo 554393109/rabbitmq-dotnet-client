@@ -31,19 +31,25 @@
 
 using System;
 
-using Xunit;
-
-namespace RabbitMQ.Client.Unit
+namespace RabbitMQ.Client
 {
-
-    public class TestPublishValidation : IntegrationFixture
+#nullable enable
+    /// <summary>
+    /// A AMQP writeable.
+    /// </summary>
+    public interface IAmqpWriteable
     {
+        /// <summary>
+        /// Gets the minimum required buffer size.
+        /// </summary>
+        /// <returns>The minimum required buffer size.</returns>
+        int GetRequiredBufferSize();
 
-        [Fact]
-        public void TestNullRoutingKeyIsRejected()
-        {
-            IModel ch = _conn.CreateModel();
-            Assert.Throws<ArgumentNullException>(() => ch.BasicPublish("", null, null, _encoding.GetBytes("msg")));
-        }
+        /// <summary>
+        /// Write this instance to the provided span.
+        /// </summary>
+        /// <param name="span">The span to write it to.</param>
+        /// <returns>The amount of bytes written.</returns>
+        int WriteTo(Span<byte> span);
     }
 }

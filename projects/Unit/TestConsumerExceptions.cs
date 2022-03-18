@@ -33,6 +33,7 @@ using System;
 using System.Threading;
 
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RabbitMQ.Client.Unit
 {
@@ -50,7 +51,7 @@ namespace RabbitMQ.Client.Unit
                 bool redelivered,
                 string exchange,
                 string routingKey,
-                IBasicProperties properties,
+                in ReadOnlyBasicProperties properties,
                 ReadOnlyMemory<byte> body)
             {
                 throw new Exception("oops");
@@ -126,6 +127,10 @@ namespace RabbitMQ.Client.Unit
             Assert.True(notified);
         }
 
+        public TestConsumerExceptions(ITestOutputHelper output) : base(output)
+        {
+        }
+
         [Fact]
         public void TestCancelNotificationExceptionHandling()
         {
@@ -158,7 +163,7 @@ namespace RabbitMQ.Client.Unit
         public void TestDeliveryExceptionHandling()
         {
             IBasicConsumer consumer = new ConsumerFailingOnDelivery(_model);
-            TestExceptionHandlingWith(consumer, (m, q, c, ct) => m.BasicPublish("", q, null, _encoding.GetBytes("msg")));
+            TestExceptionHandlingWith(consumer, (m, q, c, ct) => m.BasicPublish("", q, _encoding.GetBytes("msg")));
         }
     }
 }

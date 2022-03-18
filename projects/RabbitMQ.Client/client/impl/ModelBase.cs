@@ -51,7 +51,6 @@ namespace RabbitMQ.Client.Impl
         ///<summary>Only used to kick-start a connection open
         ///sequence. See <see cref="Connection.Open"/> </summary>
         internal BlockingCell<ConnectionStartDetails> m_connectionStartCell;
-        internal readonly IBasicProperties _emptyBasicProperties;
 
         private readonly RpcContinuationQueue _continuationQueue = new RpcContinuationQueue();
         private readonly ManualResetEventSlim _flowControlBlock = new ManualResetEventSlim(true);
@@ -67,13 +66,13 @@ namespace RabbitMQ.Client.Impl
 
         internal IConsumerDispatcher ConsumerDispatcher { get; }
 
-        protected ModelBase(bool dispatchAsync, int concurrency, ISession session)
+        protected ModelBase(ConnectionConfig config, ISession session)
         {
-            ConsumerDispatcher = dispatchAsync ?
-                (IConsumerDispatcher)new AsyncConsumerDispatcher(this, concurrency) :
-                new ConsumerDispatcher(this, concurrency);
+            ContinuationTimeout = config.ContinuationTimeout;
+            ConsumerDispatcher = config.DispatchConsumersAsync ?
+                (IConsumerDispatcher)new AsyncConsumerDispatcher(this, config.DispatchConsumerConcurrency) :
+                new ConsumerDispatcher(this, config.DispatchConsumerConcurrency);
 
-            _emptyBasicProperties = CreateBasicProperties();
             Action<Exception, string> onException = (exception, context) => OnCallbackException(CallbackExceptionEventArgs.Build(exception, context));
             _basicAcksWrapper = new EventingWrapper<BasicAckEventArgs>("OnBasicAck", onException);
             _basicNacksWrapper = new EventingWrapper<BasicNackEventArgs>("OnBasicNack", onException);
@@ -89,7 +88,7 @@ namespace RabbitMQ.Client.Impl
         }
 
         internal TimeSpan HandshakeContinuationTimeout { get; set; } = TimeSpan.FromSeconds(10);
-        public TimeSpan ContinuationTimeout { get; set; } = TimeSpan.FromSeconds(20);
+        public TimeSpan ContinuationTimeout { get; set; }
 
         public event EventHandler<BasicAckEventArgs> BasicAcks
         {
@@ -334,7 +333,7 @@ namespace RabbitMQ.Client.Impl
             }
         }
 
-        protected void ModelRpc<TMethod>(in TMethod method, ProtocolCommandId returnCommandId)
+        protected void ModelRpc<TMethod>(ref  TMethod method, ProtocolCommandId returnCommandId)
             where TMethod : struct, IOutgoingAmqpMethod
         {
             var k = new SimpleBlockingRpcContinuation();
@@ -342,7 +341,7 @@ namespace RabbitMQ.Client.Impl
             lock (_rpcLock)
             {
                 Enqueue(k);
-                Session.Transmit(method);
+                Session.Transmit(ref method);
                 k.GetReply(ContinuationTimeout, out reply);
             }
 
@@ -354,7 +353,7 @@ namespace RabbitMQ.Client.Impl
             }
         }
 
-        protected TReturn ModelRpc<TMethod, TReturn>(in TMethod method, ProtocolCommandId returnCommandId, Func<ReadOnlyMemory<byte>, TReturn> createFunc)
+        protected TReturn ModelRpc<TMethod, TReturn>(ref  TMethod method, ProtocolCommandId returnCommandId, Func<ReadOnlyMemory<byte>, TReturn> createFunc)
             where TMethod : struct, IOutgoingAmqpMethod
         {
             var k = new SimpleBlockingRpcContinuation();
@@ -363,7 +362,7 @@ namespace RabbitMQ.Client.Impl
             lock (_rpcLock)
             {
                 Enqueue(k);
-                Session.Transmit(method);
+                Session.Transmit(ref method);
                 k.GetReply(ContinuationTimeout, out reply);
             }
 
@@ -379,19 +378,21 @@ namespace RabbitMQ.Client.Impl
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void ModelSend<T>(in T method) where T : struct, IOutgoingAmqpMethod
+        protected void ModelSend<T>(ref  T method) where T : struct, IOutgoingAmqpMethod
         {
-            Session.Transmit(method);
+            Session.Transmit(ref method);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void ModelSend<T>(in T method, ContentHeaderBase header, ReadOnlyMemory<byte> body) where T : struct, IOutgoingAmqpMethod
+        protected void ModelSend<TMethod, THeader>(ref TMethod method, ref THeader header, ReadOnlyMemory<byte> body)
+            where TMethod : struct, IOutgoingAmqpMethod
+            where THeader : IAmqpHeader
         {
             if (!_flowControlBlock.IsSet)
             {
                 _flowControlBlock.Wait();
             }
-            Session.Transmit(method, header, body);
+            Session.Transmit(ref method, ref header, body);
         }
 
         internal void OnCallbackException(CallbackExceptionEventArgs args)
@@ -574,6 +575,8 @@ namespace RabbitMQ.Client.Impl
         {
             var method = new Client.Framing.Impl.BasicDeliver(cmd.MethodBytes.Span);
             cmd.ReturnMethodBuffer();
+            var header = new ReadOnlyBasicProperties(cmd.HeaderBytes.Span);
+            cmd.ReturnHeaderBuffer();
 
             ConsumerDispatcher.HandleBasicDeliver(
                     method._consumerTag,
@@ -581,15 +584,18 @@ namespace RabbitMQ.Client.Impl
                     method._redelivered,
                     method._exchange,
                     method._routingKey,
-                    (IBasicProperties)cmd.Header,
+                    header,
                     cmd.Body,
-                    cmd.TakeoverPayload());
+                    cmd.TakeoverBody());
         }
 
         protected void HandleBasicGetOk(in IncomingCommand cmd)
         {
             var method = new BasicGetOk(cmd.MethodBytes.Span);
             cmd.ReturnMethodBuffer();
+            var header = new ReadOnlyBasicProperties(cmd.HeaderBytes.Span);
+            cmd.ReturnHeaderBuffer();
+
             var k = (BasicGetRpcContinuation)_continuationQueue.Next();
             k.m_result = new BasicGetResult(
                 AdjustDeliveryTag(method._deliveryTag),
@@ -597,9 +603,9 @@ namespace RabbitMQ.Client.Impl
                 method._exchange,
                 method._routingKey,
                 method._messageCount,
-                (IBasicProperties)cmd.Header,
+                header,
                 cmd.Body,
-                cmd.TakeoverPayload());
+                cmd.TakeoverBody());
             k.HandleCommand(IncomingCommand.Empty); // release the continuation.
         }
 
@@ -633,13 +639,14 @@ namespace RabbitMQ.Client.Impl
                     ReplyText = basicReturn._replyText,
                     Exchange = basicReturn._exchange,
                     RoutingKey = basicReturn._routingKey,
-                    BasicProperties = (IBasicProperties)cmd.Header,
+                    BasicProperties = new ReadOnlyBasicProperties(cmd.HeaderBytes.Span),
                     Body = cmd.Body
                 };
                 _basicReturnWrapper.Invoke(this, e);
             }
             cmd.ReturnMethodBuffer();
-            ArrayPool<byte>.Shared.Return(cmd.TakeoverPayload());
+            cmd.ReturnHeaderBuffer();
+            ArrayPool<byte>.Shared.Return(cmd.TakeoverBody());
         }
 
         protected void HandleChannelClose(in IncomingCommand cmd)
@@ -736,7 +743,7 @@ namespace RabbitMQ.Client.Impl
             if (m_connectionStartCell is null)
             {
                 var reason = new ShutdownEventArgs(ShutdownInitiator.Library, Constants.CommandInvalid, "Unexpected Connection.Start");
-                Session.Connection.Close(reason, false, Timeout.InfiniteTimeSpan);
+                Session.Connection.Close(reason, false, InternalConstants.DefaultConnectionCloseTimeout);
             }
 
             var method = new ConnectionStart(cmd.MethodBytes.Span);
@@ -789,10 +796,6 @@ namespace RabbitMQ.Client.Impl
         public abstract void _Private_BasicConsume(string queue, string consumerTag, bool noLocal, bool autoAck, bool exclusive, bool nowait, IDictionary<string, object> arguments);
 
         public abstract void _Private_BasicGet(string queue, bool autoAck);
-
-        public abstract void _Private_BasicPublish(string exchange, string routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body);
-
-        public abstract void _Private_BasicPublishMemory(ReadOnlyMemory<byte> exchange, ReadOnlyMemory<byte> routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body);
 
         public abstract void _Private_BasicRecover(bool requeue);
 
@@ -895,13 +898,9 @@ namespace RabbitMQ.Client.Impl
 
         public abstract void BasicNack(ulong deliveryTag, bool multiple, bool requeue);
 
-        public void BasicPublish(string exchange, string routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body)
+        public void BasicPublish<TProperties>(string exchange, string routingKey, ref TProperties basicProperties, ReadOnlyMemory<byte> body, bool mandatory)
+            where TProperties : IReadOnlyBasicProperties, IAmqpHeader
         {
-            if (routingKey is null)
-            {
-                throw new ArgumentNullException(nameof(routingKey));
-            }
-
             if (NextPublishSeqNo > 0)
             {
                 lock (_confirmLock)
@@ -910,14 +909,12 @@ namespace RabbitMQ.Client.Impl
                 }
             }
 
-            _Private_BasicPublish(exchange,
-                routingKey,
-                mandatory,
-                basicProperties ?? _emptyBasicProperties,
-                body);
+            var cmd = new BasicPublish(exchange, routingKey, mandatory, default);
+            ModelSend(ref cmd, ref basicProperties, body);
         }
 
-        public void BasicPublish(CachedString exchange, CachedString routingKey, bool mandatory, IBasicProperties basicProperties, ReadOnlyMemory<byte> body)
+        public void BasicPublish<TProperties>(CachedString exchange, CachedString routingKey, ref TProperties basicProperties, ReadOnlyMemory<byte> body, bool mandatory)
+            where TProperties : IReadOnlyBasicProperties, IAmqpHeader
         {
             if (NextPublishSeqNo > 0)
             {
@@ -927,7 +924,8 @@ namespace RabbitMQ.Client.Impl
                 }
             }
 
-            _Private_BasicPublishMemory(exchange.Bytes, routingKey.Bytes, mandatory, basicProperties ?? _emptyBasicProperties, body);
+            var cmd = new BasicPublishMemory(exchange.Bytes, routingKey.Bytes, mandatory, default);
+            ModelSend(ref cmd, ref basicProperties, body);
         }
 
         public void UpdateSecret(string newSecret, string reason)
@@ -973,8 +971,6 @@ namespace RabbitMQ.Client.Impl
 
             _Private_ConfirmSelect(false);
         }
-
-        public abstract IBasicProperties CreateBasicProperties();
 
         public void ExchangeBind(string destination, string source, string routingKey, IDictionary<string, object> arguments)
         {

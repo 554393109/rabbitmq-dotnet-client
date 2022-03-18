@@ -33,19 +33,24 @@ using System;
 using System.Threading.Tasks;
 
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RabbitMQ.Client.Unit
 {
 
     public class TestExtensions : IntegrationFixture
     {
+        public TestExtensions(ITestOutputHelper output) : base(output)
+        {
+        }
+
         [Fact]
         public async Task TestConfirmBarrier()
         {
             _model.ConfirmSelect();
             for (int i = 0; i < 10; i++)
             {
-                _model.BasicPublish("", string.Empty, null, new byte[] { });
+                _model.BasicPublish("", string.Empty);
             }
             Assert.True(await _model.WaitForConfirmsAsync().ConfigureAwait(false));
         }
@@ -69,12 +74,12 @@ namespace RabbitMQ.Client.Unit
             _model.ExchangeBind("dest", "src", string.Empty);
             _model.QueueBind(queue, "dest", string.Empty);
 
-            _model.BasicPublish("src", string.Empty, null, new byte[] { });
+            _model.BasicPublish("src", string.Empty);
             await _model.WaitForConfirmsAsync().ConfigureAwait(false);
             Assert.NotNull(_model.BasicGet(queue, true));
 
             _model.ExchangeUnbind("dest", "src", string.Empty);
-            _model.BasicPublish("src", string.Empty, null, new byte[] { });
+            _model.BasicPublish("src", string.Empty);
             await _model.WaitForConfirmsAsync().ConfigureAwait(false);
             Assert.Null(_model.BasicGet(queue, true));
 

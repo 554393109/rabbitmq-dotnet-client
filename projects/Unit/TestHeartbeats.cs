@@ -31,14 +31,20 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RabbitMQ.Client.Unit
 {
     public class TestHeartbeats : IntegrationFixture
     {
+        public TestHeartbeats(ITestOutputHelper output) : base(output)
+        {
+        }
+
         private readonly TimeSpan _heartbeatTimeout = TimeSpan.FromSeconds(2);
 
         [Fact(Timeout = 35000)]
@@ -53,33 +59,28 @@ namespace RabbitMQ.Client.Unit
             RunSingleConnectionTest(cf);
         }
 
-        [Fact]
+        [SkippableFact]
         public void TestThatHeartbeatWriterWithTLSEnabled()
         {
-            if (!LongRunningTestsEnabled())
-            {
-                Console.WriteLine("RABBITMQ_LONG_RUNNING_TESTS is not set, skipping test");
-                return;
-            }
+            Skip.IfNot(LongRunningTestsEnabled(), "RABBITMQ_LONG_RUNNING_TESTS is not set, skipping test");
 
             var cf = new ConnectionFactory()
             {
+                Port = 5671,
                 RequestedHeartbeat = _heartbeatTimeout,
                 AutomaticRecoveryEnabled = false
             };
 
             string sslDir = IntegrationFixture.CertificatesDirectory();
-            if (null == sslDir)
-            {
-                Console.WriteLine("SSL_CERT_DIR is not configured, skipping test");
-                return;
-            }
-            cf.Ssl.ServerName = System.Net.Dns.GetHostName();
-            Assert.NotNull(sslDir);
-            cf.Ssl.CertPath = $"{sslDir}/client/keycert.p12";
-            string p12Password = Environment.GetEnvironmentVariable("PASSWORD");
-            Assert.NotNull(p12Password);
-            cf.Ssl.CertPassphrase = p12Password;
+            string certPassphrase = Environment.GetEnvironmentVariable("PASSWORD");
+            bool sslConfigured = Directory.Exists(sslDir) &&
+                (false == string.IsNullOrEmpty(certPassphrase));
+            Skip.IfNot(sslConfigured, "SSL_CERTS_DIR and/or PASSWORD are not configured, skipping test");
+
+            string hostName = System.Net.Dns.GetHostName();
+            cf.Ssl.ServerName = hostName;
+            cf.Ssl.CertPath = $"{sslDir}/client_{hostName}_key.p12";
+            cf.Ssl.CertPassphrase = certPassphrase;
             cf.Ssl.Enabled = true;
 
             RunSingleConnectionTest(cf);

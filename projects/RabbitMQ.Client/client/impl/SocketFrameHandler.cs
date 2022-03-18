@@ -198,22 +198,27 @@ namespace RabbitMQ.Client.Impl
         {
             lock (_semaphore)
             {
-                if (!_closed)
+                if (_closed || _socket == null)
+                {
+                    return;
+                }
+                else
                 {
                     try
                     {
                         _channelWriter.Complete();
-                        _writerTask.GetAwaiter().GetResult();
+                        _writerTask?.GetAwaiter().GetResult();
                     }
-                    catch (Exception)
+                    catch
                     {
+                        // ignore, we are closing anyway
                     }
 
                     try
                     {
                         _socket.Close();
                     }
-                    catch (Exception)
+                    catch
                     {
                         // ignore, we are closing anyway
                     }

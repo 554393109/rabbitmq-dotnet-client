@@ -36,13 +36,17 @@ using System.Threading.Tasks;
 using RabbitMQ.Client.Events;
 
 using Xunit;
+using Xunit.Abstractions;
 
 namespace RabbitMQ.Client.Unit
 {
-
     public class TestAsyncConsumerExceptions : IntegrationFixture
     {
         private static readonly Exception TestException = new Exception("oops");
+
+        public TestAsyncConsumerExceptions(ITestOutputHelper output) : base(output)
+        {
+        }
 
         protected void TestExceptionHandlingWith(IBasicConsumer consumer,
             Action<IModel, string, IBasicConsumer, string> action)
@@ -109,7 +113,7 @@ namespace RabbitMQ.Client.Unit
         public void TestDeliveryExceptionHandling()
         {
             IBasicConsumer consumer = new ConsumerFailingOnDelivery(_model);
-            TestExceptionHandlingWith(consumer, (m, q, c, ct) => m.BasicPublish("", q, null, _encoding.GetBytes("msg")));
+            TestExceptionHandlingWith(consumer, (m, q, c, ct) => m.BasicPublish("", q, _encoding.GetBytes("msg")));
         }
 
         private class ConsumerFailingOnDelivery : AsyncEventingBasicConsumer
@@ -123,7 +127,7 @@ namespace RabbitMQ.Client.Unit
                 bool redelivered,
                 string exchange,
                 string routingKey,
-                IBasicProperties properties,
+                in ReadOnlyBasicProperties properties,
                 ReadOnlyMemory<byte> body)
             {
                 return Task.FromException(TestException);

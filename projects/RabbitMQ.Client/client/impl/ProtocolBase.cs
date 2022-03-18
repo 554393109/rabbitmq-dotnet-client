@@ -65,7 +65,6 @@ namespace RabbitMQ.Client.Framing.Impl
             get { return new AmqpVersion(MajorVersion, MinorVersion); }
         }
 
-        internal abstract ContentHeaderBase DecodeContentHeaderFrom(ushort classId, ReadOnlySpan<byte> span);
         internal abstract ProtocolCommandId DecodeCommandIdFrom(ReadOnlySpan<byte> span);
 
         public override bool Equals(object obj)
@@ -81,23 +80,6 @@ namespace RabbitMQ.Client.Framing.Impl
         public override string ToString()
         {
             return Version.ToString();
-        }
-
-        public IConnection CreateConnection(IConnectionFactory factory, IFrameHandler frameHandler, string clientProvidedName = null)
-        {
-            return new Connection(factory, frameHandler, clientProvidedName);
-        }
-
-        public IConnection CreateConnection(ConnectionFactory factory, IFrameHandler frameHandler, bool automaticRecoveryEnabled, string clientProvidedName = null)
-        {
-            var ac = new AutorecoveringConnection(factory, clientProvidedName);
-            ac.Init();
-            return ac;
-        }
-
-        public IModel CreateModel(IConnectionFactory factory, ISession session)
-        {
-            return new Model(factory.DispatchConsumersAsync, factory.ConsumerDispatchConcurrency, session);
         }
     }
 }
